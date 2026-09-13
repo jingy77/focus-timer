@@ -1,43 +1,41 @@
-# 专注时间记录器
+# Time Tracker
 
-一个极简、苹果风格的 Windows 专注计时小工具。**不是倒计时**——点一下绿色按钮开始记录，专注结束后再点一下红色按钮，本次专注时长会自动保存。
+A minimal, Apple-inspired time tracking tool for Windows. **Not a countdown timer** — tap the green button to start, tap the red button when you're done, and the session is saved automatically.
 
-## 功能
+## Features
 
-- 三个分类：专注 / AI对话 / 看书，顶部点一下即可切换
-- 点击开始 / 结束，记录每一次的起止时间和时长（不是倒计时，正着数）
-- 实时显示已经过的时间（时:分:秒）
-- 每个分类分别显示"今日总时长"和当天的所有记录
-- 记录进行中不能切换分类，避免记错类别；结束后自动保存，永久留存在本地
-- 窗口边缘可以直接拖拽缩放大小
-- 单文件、零依赖，暖白背景 + 柔和鼠尾草绿/雾霾蓝/奶茶棕/珊瑚色，参考 iOS 秒表的简洁、温和风格
+- Three categories: Focus / AI Chat / Reading — switch with a tap at the top
+- Start / Stop button records the start and end time of every session (counts up, not down)
+- Live elapsed time display (hours:minutes:seconds)
+- Each category shows its own "Today's total" and today's session log
+- The category switcher locks while a session is running, so you can't accidentally log time to the wrong category; sessions save automatically and persist locally
+- The window can be freely resized by dragging any edge or corner
+- Single file, zero dependencies, warm off-white background with soft sage green / dusty blue / tan / coral accents, inspired by the simplicity of the iOS Stopwatch app
 
-## 直接运行（需要电脑装有 Python）
+## Run directly (requires Python)
 
-大多数 Windows 电脑没有预装 Python。如果你的电脑装了 Python（3.8 及以上，装的时候勾选了 "tcl/tk"，官网安装包默认就有）：
+Most Windows PCs don't come with Python pre-installed. If yours does (3.8+, with tkinter — included by default in the official installer):
 
-1. 双击 `run.bat`
+1. Double-click `run.bat`
 
-或者在命令行里：
+or from a command line:
 
 ```
 python focus_timer.py
 ```
 
-## 打包成独立的 .exe（推荐，之后无需安装 Python）
+## Build a standalone .exe (recommended — no Python needed afterward)
 
-因为我这边是在云端 Linux 环境里开发的，没法直接生成 Windows 的 .exe 文件，所以需要你在自己的 Windows 电脑上跑一次打包命令（只需要做一次，几分钟内完成）：
+1. Make sure Python is installed (get it from [python.org](https://www.python.org/downloads/) if not, and check "Add python.exe to PATH" during setup)
+2. Double-click `build_exe.bat` — it installs PyInstaller and builds the exe automatically
+3. Once done, find `TimeTracker.exe` inside the new `dist` folder — that's a standalone app you can double-click, move to your desktop, or share (no Python required on the machine that runs it)
 
-1. 确认电脑装了 Python（没有的话去 [python.org](https://www.python.org/downloads/) 下载安装，安装时记得勾选 "Add python.exe to PATH"）
-2. 双击 `build_exe.bat`，它会自动安装打包工具 PyInstaller 并生成 exe
-3. 打包完成后，在新出现的 `dist` 文件夹里找到 `专注时间.exe`，这就是可以双击直接打开、可以复制到桌面或发给别人用的独立程序了（之后这台电脑不需要 Python 也能跑）
+## Where your data is stored
 
-## 数据保存位置
+Sessions are saved to: `%APPDATA%\FocusTimer\sessions.json` (a plain JSON text file — safe to open, inspect, or back up)
 
-记录保存在：`%APPDATA%\FocusTimer\sessions.json`（普通的 JSON 文本文件，可以自己打开看/备份）
+## Files
 
-## 文件说明
-
-- `focus_timer.py` — 全部代码，一个文件，约 200 行，只用了 Python 标准库
-- `run.bat` — 直接用已安装的 Python 运行
-- `build_exe.bat` — 打包成独立 .exe
+- `focus_timer.py` — all the code, one file, ~250 lines, standard library only
+- `run.bat` — run directly with an installed Python
+- `build_exe.bat` — build a standalone .exe
