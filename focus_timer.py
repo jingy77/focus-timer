@@ -14,11 +14,14 @@ Data is stored at: %APPDATA%\FocusTimer\sessions.json (Windows)
                     ~/.focus_timer/sessions.json (other OSes, for dev)
 """
 
+import calendar
 import json
+import math
 import os
 import time
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, date, timedelta
+from tkinter import filedialog
 
 # ---------------------------------------------------------------- Colors / fonts
 # Warm, soft, low-saturation palette for a calm, unhurried feel
@@ -101,19 +104,27 @@ class FocusTimerApp:
         self.start_time = None
         self._tick_job = None
         self.current_category = CATEGORIES[0]["key"]
+        self._overlay = None  # calendar / day-view frame, when one is open
 
-        self._build_ui()
+        self.main_frame = tk.Frame(self.root, bg=BG)
+        self._build_main(self.main_frame)
+        self.main_frame.pack(fill="both", expand=True)
         self._select_category(self.current_category)
 
     # ------------------------------------------------------------ Build UI
-    def _build_ui(self):
+    def _build_main(self, root):
         pad_x = 22
 
-        tk.Label(self.root, text="Time Tracker", font=FONT_TITLE,
+        tk.Label(root, text="Time Tracker", font=FONT_TITLE,
                  bg=BG, fg=FG_SECONDARY).pack(pady=(18, 10))
 
+        cal_btn = tk.Label(root, text="\U0001F4C5", font=("Segoe UI", 13),
+                            bg=BG, fg=FG_SECONDARY, cursor="hand2")
+        cal_btn.place(relx=1.0, x=-16, y=16, anchor="ne")
+        cal_btn.bind("<Button-1>", lambda e: self._open_calendar())
+
         # Category switcher (segmented control)
-        tab_frame = tk.Frame(self.root, bg=BG)
+        tab_frame = tk.Frame(root, bg=BG)
         tab_frame.pack()
         self.tab_labels = {}
         for cat in CATEGORIES:
@@ -123,7 +134,7 @@ class FocusTimerApp:
             lbl.bind("<Button-1>", lambda e, k=cat["key"]: self._select_category(k))
             self.tab_labels[cat["key"]] = lbl
 
-        self.timer_label = tk.Label(self.root, text="00:00:00", font=FONT_TIMER,
+        self.timer_label = tk.Label(root, text="00:00:00", font=FONT_TIMER,
                                      bg=BG, fg=FG_PRIMARY)
         self.timer_label.pack(pady=(14, 16))
 
@@ -131,23 +142,23 @@ class FocusTimerApp:
         # halo ring around a solid circle
         self.canvas_size = 128
         self.btn_diameter = 94
-        self.canvas = tk.Canvas(self.root, width=self.canvas_size, height=self.canvas_size,
+        self.canvas = tk.Canvas(root, width=self.canvas_size, height=self.canvas_size,
                                  bg=BG, highlightthickness=0, cursor="hand2")
         self.canvas.pack()
         self.canvas.bind("<Button-1>", lambda e: self.toggle())
 
         # Divider
-        tk.Frame(self.root, bg=DIVIDER, height=1).pack(fill="x", padx=pad_x, pady=(22, 14))
+        tk.Frame(root, bg=DIVIDER, height=1).pack(fill="x", padx=pad_x, pady=(22, 14))
 
         # Today's stats
-        stat_frame = tk.Frame(self.root, bg=BG)
+        stat_frame = tk.Frame(root, bg=BG)
         stat_frame.pack(fill="x", padx=pad_x)
         self.stat_label = tk.Label(stat_frame, font=FONT_STAT_LABEL, bg=BG, fg=FG_SECONDARY)
         self.stat_label.pack(side="left")
         self.total_label = tk.Label(stat_frame, font=FONT_STAT_NUM, bg=BG, fg=FG_PRIMARY)
         self.total_label.pack(side="right")
 
-        log_header = tk.Frame(self.root, bg=BG)
+        log_header = tk.Frame(root, bg=BG)
         log_header.pack(fill="x", padx=pad_x, pady=(20, 6))
         tk.Label(log_header, text="Today's Log", font=FONT_STAT_LABEL,
                  bg=BG, fg=FG_SECONDARY).pack(side="left")
@@ -155,7 +166,7 @@ class FocusTimerApp:
                  bg=BG, fg=FG_SECONDARY).pack(side="right")
 
         # Today's session list
-        list_frame = tk.Frame(self.root, bg=BG)
+        list_frame = tk.Frame(root, bg=BG)
         list_frame.pack(fill="both", expand=True, padx=pad_x, pady=(0, 20))
 
         self.history_list = tk.Listbox(list_frame, font=FONT_ROW, bg=BG, fg=FG_PRIMARY,
@@ -364,6 +375,285 @@ class FocusTimerApp:
         self._dialog_buttons(win, "Cancel", "Save", cat["accent"], cancel, save)
         self._place_dialog(win, 300, 170)
         return result["value"]
+
+    def _info_dialog(self, title, message):
+        win = self._dialog_shell(title)
+        tk.Label(win, text=title, font=FONT_STAT_LABEL, bg=BG, fg=FG_PRIMARY).pack(
+            padx=22, pady=(20, 6))
+        tk.Label(win, text=message, font=FONT_ROW, bg=BG, fg=FG_SECONDARY,
+                 justify="left", wraplength=260).pack(padx=22)
+
+        def close():
+            win.destroy()
+
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", padx=22, pady=(16, 20))
+        accent = self._category(self.current_category)["accent"]
+        tk.Button(row, text="OK", font=FONT_ROW, bg=accent, fg="white",
+                  relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
+                  activebackground=accent, command=close).pack(fill="x")
+        self._place_dialog(win, 300, 210)
+
+    # ------------------------------------------------------------ Calendar / day review
+    # An overlay frame (calendar month grid, or a single day's timeline)
+    # shown on top of the main timer view. The timer keeps running
+    # underneath even while browsing history.
+    def _sessions_for_date(self, d):
+        return sorted(
+            (s for s in self.sessions if datetime.fromisoformat(s["start"]).date() == d),
+            key=lambda s: s["start"],
+        )
+
+    def _shift_month(self, year, month, delta):
+        m = month - 1 + delta
+        return year + m // 12, m % 12 + 1
+
+    def _show_overlay(self, build_fn):
+        if self._overlay is not None:
+            self._overlay.destroy()
+        self.main_frame.pack_forget()
+        frame = tk.Frame(self.root, bg=BG)
+        build_fn(frame)
+        frame.pack(fill="both", expand=True)
+        self._overlay = frame
+
+    def _close_overlay(self):
+        if self._overlay is not None:
+            self._overlay.destroy()
+            self._overlay = None
+        self.main_frame.pack(fill="both", expand=True)
+
+    def _open_calendar(self, year=None, month=None):
+        today = date.today()
+        self._show_overlay(lambda f: self._build_calendar(f, year or today.year, month or today.month))
+
+    def _open_day(self, d):
+        self._show_overlay(lambda f: self._build_day(f, d))
+
+    def _export_ics(self):
+        if not self.sessions:
+            self._info_dialog("Export to Calendar", "No sessions to export yet.")
+            return
+
+        lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//FocusTimer//EN//",
+                 "CALSCALE:GREGORIAN"]
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        for i, s in enumerate(sorted(self.sessions, key=lambda s: s["start"])):
+            start = datetime.fromisoformat(s["start"])
+            end = datetime.fromisoformat(s["end"])
+            cat = self._category(s.get("category", "focus"))
+            note = s.get("note", "").strip()
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{start.strftime('%Y%m%dT%H%M%S')}-{i}@focustimer",
+                f"DTSTAMP:{stamp}",
+                f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
+                f"DTEND:{end.strftime('%Y%m%dT%H%M%S')}",
+                f"SUMMARY:{self._ics_escape(cat['label'])}",
+            ]
+            if note:
+                lines.append(f"DESCRIPTION:{self._ics_escape(note)}")
+            lines.append("END:VEVENT")
+        lines.append("END:VCALENDAR")
+        content = "\r\n".join(lines) + "\r\n"
+
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Export to Calendar",
+            defaultextension=".ics", filetypes=[("iCalendar file", "*.ics")],
+            initialfile="time_tracker.ics",
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        self._info_dialog(
+            "Exported",
+            f"Saved as:\n{os.path.basename(path)}\n\n"
+            "Double-click it to import into your calendar app "
+            "(Apple Calendar, Outlook, Google Calendar, etc.).",
+        )
+
+    @staticmethod
+    def _ics_escape(text):
+        return (text.replace("\\", "\\\\").replace(";", "\\;")
+                    .replace(",", "\\,").replace("\n", "\\n"))
+
+    def _build_calendar(self, root, year, month):
+        top = tk.Frame(root, bg=BG)
+        top.pack(fill="x", padx=22, pady=(18, 0))
+        back = tk.Label(top, text="‹ Back", font=FONT_ROW, bg=BG, fg=FG_SECONDARY,
+                         cursor="hand2")
+        back.pack(side="left")
+        back.bind("<Button-1>", lambda e: self._close_overlay())
+        export_lbl = tk.Label(top, text="Export to Calendar", font=FONT_ROW, bg=BG,
+                               fg=FG_SECONDARY, cursor="hand2")
+        export_lbl.pack(side="right")
+        export_lbl.bind("<Button-1>", lambda e: self._export_ics())
+
+        header = tk.Frame(root, bg=BG)
+        header.pack(fill="x", padx=22, pady=(10, 4))
+        py, pm = self._shift_month(year, month, -1)
+        ny, nm = self._shift_month(year, month, 1)
+        prev_lbl = tk.Label(header, text="‹", font=("Segoe UI", 14), bg=BG, fg=FG_SECONDARY,
+                             cursor="hand2")
+        prev_lbl.pack(side="left")
+        prev_lbl.bind("<Button-1>", lambda e: self._open_calendar(py, pm))
+        tk.Label(header, text=f"{calendar.month_name[month]} {year}", font=FONT_STAT_LABEL,
+                 bg=BG, fg=FG_PRIMARY).pack(side="left", expand=True)
+        next_lbl = tk.Label(header, text="›", font=("Segoe UI", 14), bg=BG, fg=FG_SECONDARY,
+                             cursor="hand2")
+        next_lbl.pack(side="right")
+        next_lbl.bind("<Button-1>", lambda e: self._open_calendar(ny, nm))
+
+        grid = tk.Frame(root, bg=BG)
+        grid.pack(fill="both", expand=True, padx=22, pady=(4, 20))
+        for i in range(7):
+            grid.columnconfigure(i, weight=1)
+        for i, wd in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
+            tk.Label(grid, text=wd, font=("Segoe UI", 9), bg=BG, fg=FG_SECONDARY).grid(
+                row=0, column=i, pady=(0, 8))
+
+        today = date.today()
+        weeks = calendar.Calendar(firstweekday=6).monthdayscalendar(year, month)
+        for r, week in enumerate(weeks, start=1):
+            for c, day in enumerate(week):
+                if day == 0:
+                    continue
+                d = date(year, month, day)
+                cell = tk.Frame(grid, bg=BG)
+                cell.grid(row=r, column=c, sticky="nsew", pady=3)
+                num_bg = DIVIDER if d == today else BG
+                num = tk.Label(cell, text=str(day), font=FONT_ROW, bg=num_bg, fg=FG_PRIMARY,
+                                width=3, cursor="hand2")
+                num.pack()
+                dot = tk.Label(cell, text="•" if self._sessions_for_date(d) else " ",
+                                font=("Segoe UI", 8), bg=BG, fg=FG_SECONDARY, cursor="hand2")
+                dot.pack()
+                for w in (cell, num, dot):
+                    w.bind("<Button-1>", lambda e, dd=d: self._open_day(dd))
+
+    def _time_range(self, sessions, d):
+        starts, ends = [], []
+        for s in sessions:
+            sd = datetime.fromisoformat(s["start"])
+            ed = datetime.fromisoformat(s["end"])
+            starts.append(sd.hour + sd.minute / 60)
+            ends.append(24.0 if ed.date() != d else ed.hour + ed.minute / 60)
+        lo = max(0, math.floor(min(starts)) - 1)
+        hi = min(24, math.ceil(max(ends)) + 1)
+        if hi - lo < 4:
+            lo, hi = max(0, hi - 4), min(24, lo + 4)
+        return lo, hi
+
+    def _build_day(self, root, d):
+        top = tk.Frame(root, bg=BG)
+        top.pack(fill="x", padx=22, pady=(18, 0))
+        back = tk.Label(top, text="‹ Calendar", font=FONT_ROW, bg=BG, fg=FG_SECONDARY,
+                         cursor="hand2")
+        back.pack(side="left")
+        back.bind("<Button-1>", lambda e: self._open_calendar(d.year, d.month))
+
+        nav = tk.Frame(root, bg=BG)
+        nav.pack(fill="x", padx=22, pady=(10, 14))
+        prev_lbl = tk.Label(nav, text="‹", font=("Segoe UI", 14), bg=BG, fg=FG_SECONDARY,
+                             cursor="hand2")
+        prev_lbl.pack(side="left")
+        prev_lbl.bind("<Button-1>", lambda e: self._open_day(d - timedelta(days=1)))
+        tk.Label(nav, text=d.strftime("%a, %b %d"), font=FONT_STAT_LABEL, bg=BG,
+                 fg=FG_PRIMARY).pack(side="left", expand=True)
+        next_lbl = tk.Label(nav, text="›", font=("Segoe UI", 14), bg=BG, fg=FG_SECONDARY,
+                             cursor="hand2")
+        next_lbl.pack(side="right")
+        next_lbl.bind("<Button-1>", lambda e: self._open_day(d + timedelta(days=1)))
+
+        sessions = self._sessions_for_date(d)
+        if not sessions:
+            tk.Label(root, text="No sessions this day", font=FONT_ROW, bg=BG,
+                     fg=FG_SECONDARY).pack(pady=40)
+            return
+
+        # ---- Daily report: total time + a pie chart of the category split ----
+        per_cat_sec = {c["key"]: 0 for c in CATEGORIES}
+        for s in sessions:
+            per_cat_sec[s.get("category", "focus")] += s["duration_sec"]
+        day_total = sum(per_cat_sec.values())
+
+        report = tk.Frame(root, bg=BG)
+        report.pack(fill="x", padx=22, pady=(0, 16))
+        tk.Label(report, text=f"Total today: {fmt_duration(day_total)}", font=FONT_STAT_LABEL,
+                 bg=BG, fg=FG_PRIMARY).pack(anchor="w")
+
+        body = tk.Frame(report, bg=BG)
+        body.pack(fill="x", pady=(10, 0))
+        pie_size = 96
+        pie_cv = tk.Canvas(body, width=pie_size, height=pie_size, bg=BG, highlightthickness=0)
+        pie_cv.pack(side="left")
+        legend = tk.Frame(body, bg=BG)
+        legend.pack(side="left", padx=(18, 0), fill="y")
+
+        angle = 90.0
+        for cat in CATEGORIES:
+            sec = per_cat_sec[cat["key"]]
+            if sec <= 0:
+                continue
+            fraction = sec / day_total
+            extent = -fraction * 360
+            pie_cv.create_arc(2, 2, pie_size - 2, pie_size - 2, start=angle, extent=extent,
+                               fill=cat["accent"], outline=BG, width=2)
+            angle += extent
+
+            row = tk.Frame(legend, bg=BG)
+            row.pack(anchor="w", pady=2)
+            tk.Frame(row, bg=cat["accent"], width=10, height=10).pack(side="left")
+            tk.Label(row, text=f" {cat['label']}  {fmt_duration(sec)} ({round(fraction * 100)}%)",
+                     font=("Segoe UI", 9), bg=BG, fg=FG_PRIMARY).pack(side="left")
+
+        tk.Frame(root, bg=DIVIDER, height=1).pack(fill="x", padx=22, pady=(0, 14))
+
+        lo, hi = self._time_range(sessions, d)
+        px = 70               # pixels per hour
+        label_w = 46          # left column reserved for hour labels
+        block_w = 190         # width of the colored session blocks
+        canvas_w = label_w + 10 + block_w + 16
+        canvas_h = int((hi - lo) * px)
+
+        def y_of(hour):
+            return (hour - lo) * px
+
+        outer = tk.Frame(root, bg=BG)
+        outer.pack(fill="both", expand=True, padx=(22, 8), pady=(0, 20))
+        vsb = tk.Scrollbar(outer, orient="vertical")
+        vsb.pack(side="right", fill="y")
+        cv = tk.Canvas(outer, bg=BG, highlightthickness=0, width=canvas_w,
+                        yscrollcommand=vsb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        vsb.config(command=cv.yview)
+        cv.bind("<MouseWheel>", lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
+
+        for h in range(lo, hi + 1):
+            y = y_of(h)
+            cv.create_line(label_w, y, canvas_w, y, fill=DIVIDER)
+            cv.create_text(label_w - 8, y, text=f"{h:02d}:00", font=("Segoe UI", 9),
+                            fill=FG_SECONDARY, anchor="e")
+
+        x0, x1 = label_w + 10, label_w + 10 + block_w
+        for s in sessions:
+            cat = self._category(s.get("category", "focus"))
+            start_dt = datetime.fromisoformat(s["start"])
+            end_dt = datetime.fromisoformat(s["end"])
+            sh = start_dt.hour + start_dt.minute / 60
+            eh = 24.0 if end_dt.date() != d else end_dt.hour + end_dt.minute / 60
+            y0, y1 = y_of(sh), max(y_of(eh), y_of(sh) + 3)
+            cv.create_rectangle(x0, y0, x1, y1, fill=cat["accent"], outline="")
+            if y1 - y0 >= 18:
+                text = f"{cat['label']}  {start_dt:%H:%M}-{end_dt:%H:%M}"
+                note = s.get("note", "").strip()
+                if note and y1 - y0 >= 34:
+                    text += f"\n{note}"
+                cv.create_text(x0 + 8, y0 + 4, text=text, font=("Segoe UI", 9),
+                                fill="white", anchor="nw")
+
+        cv.configure(scrollregion=(0, 0, canvas_w, canvas_h))
 
 
 def main():

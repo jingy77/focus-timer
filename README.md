@@ -11,6 +11,8 @@ A minimal, Apple-inspired time tracking tool for Windows. **Not a countdown time
 - The category switcher locks while a session is running, so you can't accidentally log time to the wrong category; sessions save automatically and persist locally
 - Click any row in "Today's Log" to attach a short note (what you read, who you chatted with, etc.); right-click a row to delete it (with a confirmation step)
 - Dialogs are styled to match the app itself (warm background, soft-colored buttons) instead of the system's default message boxes
+- Click the calendar icon in the top corner to review past days: any date with sessions gets a small dot, and opening a day shows the day's total time, a pie chart of the category split, and a timeline with each Focus / AI Chat / Reading block placed at the actual time it happened, notes included
+- From the calendar, "Export to Calendar" saves all your sessions as a single .ics file you can double-click to import into Apple Calendar, Outlook, Google Calendar, etc.
 - The window can be freely resized by dragging any edge or corner
 - Single file, zero dependencies, warm off-white background with soft sage green / dusty blue / tan / coral accents, inspired by the simplicity of the iOS Stopwatch app
 
