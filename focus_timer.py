@@ -147,8 +147,12 @@ class FocusTimerApp:
         self.total_label = tk.Label(stat_frame, font=FONT_STAT_NUM, bg=BG, fg=FG_PRIMARY)
         self.total_label.pack(side="right")
 
-        tk.Label(self.root, text="Today's Log", font=FONT_STAT_LABEL,
-                 bg=BG, fg=FG_SECONDARY).pack(anchor="w", padx=pad_x, pady=(20, 6))
+        log_header = tk.Frame(self.root, bg=BG)
+        log_header.pack(fill="x", padx=pad_x, pady=(20, 6))
+        tk.Label(log_header, text="Today's Log", font=FONT_STAT_LABEL,
+                 bg=BG, fg=FG_SECONDARY).pack(side="left")
+        tk.Label(log_header, text="click: note · right-click: delete", font=("Segoe UI", 9),
+                 bg=BG, fg=FG_SECONDARY).pack(side="right")
 
         # Today's session list
         list_frame = tk.Frame(self.root, bg=BG)
@@ -159,6 +163,9 @@ class FocusTimerApp:
                                         selectbackground=DIVIDER, activestyle="none",
                                         bd=0)
         self.history_list.pack(fill="both", expand=True)
+        self.history_list.bind("<Button-1>", self._on_history_left_click)
+        self.history_list.bind("<Button-3>", self._on_history_right_click)
+        self._visible_sessions = []  # rows currently shown, same order as the listbox
 
     def _draw_button(self, color, halo_color, text):
         self.canvas.delete("all")
@@ -242,14 +249,121 @@ class FocusTimerApp:
         self.total_label.config(text=fmt_duration(total_sec) if total_sec else "0m")
 
         self.history_list.delete(0, "end")
-        for s in reversed(todays):
-            start = datetime.fromisoformat(s["start"])
-            end = datetime.fromisoformat(s["end"])
-            row = f"  {start:%H:%M} - {end:%H:%M}      {fmt_duration(s['duration_sec'])}"
-            self.history_list.insert("end", row)
+        self._visible_sessions = list(reversed(todays))
+        for s in self._visible_sessions:
+            self.history_list.insert("end", self._row_text(s))
 
         if not todays:
             self.history_list.insert("end", f"  No {label} sessions yet -- tap the button above to start")
+
+    def _row_summary(self, s):
+        start = datetime.fromisoformat(s["start"])
+        end = datetime.fromisoformat(s["end"])
+        return f"{start:%H:%M} - {end:%H:%M}   {fmt_duration(s['duration_sec'])}"
+
+    def _row_text(self, s):
+        note = s.get("note", "").strip()
+        tail = f"  · {note}" if note else "   +"
+        return f"  {self._row_summary(s)}{tail}"
+
+    def _on_history_left_click(self, event):
+        index = self.history_list.nearest(event.y)
+        if index < 0 or index >= len(self._visible_sessions):
+            return  # empty-state placeholder row
+        session = self._visible_sessions[index]
+        new_note = self._prompt_note(session.get("note", ""))
+        if new_note is not None:
+            session["note"] = new_note
+            save_sessions(self.sessions)
+            self._refresh_history()
+
+    def _on_history_right_click(self, event):
+        index = self.history_list.nearest(event.y)
+        if index < 0 or index >= len(self._visible_sessions):
+            return  # empty-state placeholder row, or nothing to delete
+        self.history_list.selection_clear(0, "end")
+        self.history_list.selection_set(index)
+        session = self._visible_sessions[index]
+        if self._confirm_delete(self._row_summary(session)):
+            self.sessions.remove(session)
+            save_sessions(self.sessions)
+            self._refresh_history()
+
+    # ------------------------------------------------------------ Dialogs
+    # Small modal windows styled to match the app instead of the system's
+    # default message boxes.
+    def _dialog_shell(self, title):
+        win = tk.Toplevel(self.root, bg=BG)
+        win.title(title)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.configure(bg=BG)
+        return win
+
+    def _place_dialog(self, win, w, h):
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        win.grab_set()
+        win.wait_window()
+
+    def _dialog_buttons(self, win, cancel_text, action_text, action_color, on_cancel, on_action):
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", padx=22, pady=(16, 20))
+        tk.Button(row, text=cancel_text, font=FONT_ROW, bg=DIVIDER, fg=FG_PRIMARY,
+                  relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
+                  activebackground=DIVIDER, command=on_cancel).pack(side="left", expand=True,
+                                                                     fill="x", padx=(0, 6))
+        tk.Button(row, text=action_text, font=FONT_ROW, bg=action_color, fg="white",
+                  relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
+                  activebackground=action_color, command=on_action).pack(side="right", expand=True,
+                                                                          fill="x", padx=(6, 0))
+
+    def _confirm_delete(self, summary):
+        win = self._dialog_shell("Delete Session")
+        result = {"ok": False}
+        tk.Label(win, text="Delete this session?", font=FONT_STAT_LABEL,
+                 bg=BG, fg=FG_PRIMARY).pack(padx=22, pady=(20, 6))
+        tk.Label(win, text=summary, font=FONT_ROW, bg=BG, fg=FG_SECONDARY).pack(padx=22)
+
+        def cancel():
+            win.destroy()
+
+        def confirm():
+            result["ok"] = True
+            win.destroy()
+
+        self._dialog_buttons(win, "Cancel", "Delete", CORAL, cancel, confirm)
+        self._place_dialog(win, 300, 170)
+        return result["ok"]
+
+    def _prompt_note(self, current):
+        cat = self._category(self.current_category)
+        win = self._dialog_shell("Note")
+        result = {"value": None}
+        tk.Label(win, text="Note", font=FONT_STAT_LABEL, bg=BG, fg=FG_PRIMARY).pack(
+            padx=22, pady=(20, 8), anchor="w")
+        entry = tk.Entry(win, font=FONT_ROW, bg="white", fg=FG_PRIMARY, relief="flat",
+                          highlightthickness=1, highlightbackground=DIVIDER,
+                          highlightcolor=cat["accent"])
+        entry.insert(0, current)
+        entry.pack(padx=22, fill="x", ipady=6)
+        entry.focus_set()
+        entry.icursor("end")
+
+        def cancel():
+            win.destroy()
+
+        def save():
+            result["value"] = entry.get().strip()
+            win.destroy()
+
+        entry.bind("<Return>", lambda e: save())
+        entry.bind("<Escape>", lambda e: cancel())
+        self._dialog_buttons(win, "Cancel", "Save", cat["accent"], cancel, save)
+        self._place_dialog(win, 300, 170)
+        return result["value"]
 
 
 def main():

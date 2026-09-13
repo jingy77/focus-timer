@@ -9,6 +9,8 @@ A minimal, Apple-inspired time tracking tool for Windows. **Not a countdown time
 - Live elapsed time display (hours:minutes:seconds)
 - Each category shows its own "Today's total" and today's session log
 - The category switcher locks while a session is running, so you can't accidentally log time to the wrong category; sessions save automatically and persist locally
+- Click any row in "Today's Log" to attach a short note (what you read, who you chatted with, etc.); right-click a row to delete it (with a confirmation step)
+- Dialogs are styled to match the app itself (warm background, soft-colored buttons) instead of the system's default message boxes
 - The window can be freely resized by dragging any edge or corner
 - Single file, zero dependencies, warm off-white background with soft sage green / dusty blue / tan / coral accents, inspired by the simplicity of the iOS Stopwatch app
 
