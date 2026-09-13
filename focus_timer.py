@@ -608,7 +608,9 @@ class FocusTimerApp:
             tk.Label(row, text=f" {cat['label']}  {fmt_duration(sec)} ({round(fraction * 100)}%)",
                      font=("Segoe UI", 9), bg=BG, fg=FG_PRIMARY).pack(side="left")
 
-        tk.Frame(root, bg=DIVIDER, height=1).pack(fill="x", padx=22, pady=(0, 14))
+        tk.Frame(root, bg=DIVIDER, height=1).pack(fill="x", padx=22, pady=(0, 4))
+        tk.Label(root, text="double-click a block to edit its note", font=("Segoe UI", 9), bg=BG,
+                 fg=FG_SECONDARY).pack(anchor="e", padx=22, pady=(0, 6))
 
         lo, hi = self._time_range(sessions, d)
         px = 70               # pixels per hour
@@ -637,6 +639,7 @@ class FocusTimerApp:
                             fill=FG_SECONDARY, anchor="e")
 
         x0, x1 = label_w + 10, label_w + 10 + block_w
+        blocks = []  # (y0, y1, session) -- used to find which block a double-click landed on
         for s in sessions:
             cat = self._category(s.get("category", "focus"))
             start_dt = datetime.fromisoformat(s["start"])
@@ -645,6 +648,7 @@ class FocusTimerApp:
             eh = 24.0 if end_dt.date() != d else end_dt.hour + end_dt.minute / 60
             y0, y1 = y_of(sh), max(y_of(eh), y_of(sh) + 3)
             cv.create_rectangle(x0, y0, x1, y1, fill=cat["accent"], outline="")
+            blocks.append((y0, y1, s))
             if y1 - y0 >= 18:
                 text = f"{cat['label']}  {start_dt:%H:%M}-{end_dt:%H:%M}"
                 note = s.get("note", "").strip()
@@ -654,6 +658,21 @@ class FocusTimerApp:
                                 fill="white", anchor="nw")
 
         cv.configure(scrollregion=(0, 0, canvas_w, canvas_h))
+
+        def on_double_click(event):
+            cx, cy = cv.canvasx(event.x), cv.canvasy(event.y)
+            if not (x0 <= cx <= x1):
+                return
+            for by0, by1, s in blocks:
+                if by0 <= cy <= by1:
+                    new_note = self._prompt_note(s.get("note", ""))
+                    if new_note is not None:
+                        s["note"] = new_note
+                        save_sessions(self.sessions)
+                        self._open_day(d)  # re-render this day so the new note shows up
+                    break
+
+        cv.bind("<Double-Button-1>", on_double_click)
 
 
 def main():
