@@ -2,7 +2,7 @@ r"""
 Time Tracker
 ------------------------------------------------------------
 A minimal, Apple-inspired time tracking tool for Windows, covering
-three categories: Focus / AI Chat / Reading.
+four categories: Focus / AI Chat / Reading / Work.
 
 Usage: pick a category at the top, tap the round button to start
 timing, tap it again to stop and save. It's a stopwatch, not a
@@ -10,18 +10,25 @@ countdown -- it just records how long you spent.
 
 Dependencies: Python standard library only (tkinter). No third-party
 packages required.
-Data is stored at: %APPDATA%\FocusTimer\sessions.json (Windows)
+Data is stored at: <your chosen sync folder>\FocusTimer\sessions.json
+                    (once you pick one in the sync settings -- any
+                    synced folder works: Google Drive, OneDrive, Dropbox, ...)
+                    %APPDATA%\FocusTimer\sessions.json (Windows, no sync folder chosen)
                     ~/.focus_timer/sessions.json (other OSes, for dev)
 """
 
 import calendar
+import ctypes
 import json
 import math
 import os
+import shutil
 import time
 import tkinter as tk
 from datetime import datetime, date, timedelta
 from tkinter import filedialog
+
+IDLE_LIMIT_SEC = 600  # auto-stop after 10 minutes with no mouse/keyboard activity
 
 # ---------------------------------------------------------------- Colors / fonts
 # Warm, soft, low-saturation palette for a calm, unhurried feel
@@ -40,24 +47,138 @@ FONT_STAT_NUM = ("Segoe UI", 18)
 FONT_STAT_LABEL = ("Segoe UI", 11)
 FONT_ROW = ("Segoe UI", 11)
 
-# Three categories, each with its own soft accent color (used for the
+# Four categories, each with its own soft accent color (used for the
 # start button and the selected tab)
 CATEGORIES = [
     {"key": "focus", "label": "Focus", "accent": "#93BFA3", "halo": "#E4EFE8"},
     {"key": "ai_chat", "label": "AI Chat", "accent": "#96AFC9", "halo": "#E7ECF3"},
     {"key": "reading", "label": "Reading", "accent": "#D9B47E", "halo": "#F6ECDA"},
+    {"key": "work", "label": "Work", "accent": "#A9784F", "halo": "#EEE1D2"},
 ]
 
 
-def data_file_path() -> str:
-    """Return the JSON file path used to store sessions (APPDATA on Windows)."""
+def get_idle_seconds() -> float:
+    """Seconds since the last mouse/keyboard input system-wide (Windows only; 0 elsewhere)."""
+    if os.name != "nt":
+        return 0.0
+    try:
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        millis = ctypes.windll.kernel32.GetTickCount() - info.dwTime
+        return max(0, millis) / 1000.0
+    except Exception:
+        return 0.0
+
+
+def local_config_dir() -> str:
+    """A per-device folder that never lives inside a synced drive -- it only
+    remembers *which* synced folder (if any) the data itself is stored in."""
     appdata = os.environ.get("APPDATA")
     if appdata:
         folder = os.path.join(appdata, "FocusTimer")
     else:
         folder = os.path.join(os.path.expanduser("~"), ".focus_timer")
     os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def load_config():
+    path = os.path.join(local_config_dir(), "config.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_config(cfg):
+    path = os.path.join(local_config_dir(), "config.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def data_file_path() -> str:
+    """Return the JSON file path used to store sessions.
+
+    Preference order: a sync folder picked manually in Sync Settings (Google
+    Drive, OneDrive, Dropbox, or anything else with a desktop sync client);
+    otherwise the local, device-only APPDATA folder.
+
+    Note: this no longer auto-switches to OneDrive just because it's
+    detected on the machine. An earlier version did that, and on machines
+    where Windows sets up a OneDrive environment variable even though the
+    person isn't really using OneDrive, the app would silently start
+    reading/writing a new, empty location -- making it look like all the
+    old records had vanished, when they were still sitting at the old
+    path. Now the storage location only changes when the person picks one
+    themselves in Sync Settings.
+    """
+    custom = load_config().get("sync_base_folder")
+    if custom and os.path.isdir(custom):
+        folder = os.path.join(custom, "FocusTimer")
+    else:
+        folder = local_config_dir()
+    os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "sessions.json")
+
+
+def _read_sessions_file(path):
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _legacy_candidate_paths(current_path):
+    """Places an earlier version of the app might have stored sessions
+    (used only to recover data -- doesn't affect where new data is saved)."""
+    candidates = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(os.path.join(appdata, "FocusTimer", "sessions.json"))
+    onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer")
+    if onedrive and os.path.isdir(onedrive):
+        candidates.append(os.path.join(onedrive, "FocusTimer", "sessions.json"))
+    candidates.append(os.path.join(os.path.expanduser("~"), ".focus_timer", "sessions.json"))
+    current_abs = os.path.abspath(current_path)
+    seen = set()
+    result = []
+    for c in candidates:
+        c_abs = os.path.abspath(c)
+        if c_abs != current_abs and c_abs not in seen:
+            seen.add(c_abs)
+            result.append(c)
+    return result
+
+
+def migrate_legacy_data_if_needed():
+    """If the location the app is about to use is empty, but another
+    location (e.g. a OneDrive folder an earlier version auto-switched to)
+    still has records, bring them back automatically so data that's still
+    there doesn't look "lost" on open. Only runs when the current location
+    has no records at all, and never overwrites existing records."""
+    current_path = data_file_path()
+    if _read_sessions_file(current_path):
+        return
+    best_path, best_sessions = None, []
+    for candidate in _legacy_candidate_paths(current_path):
+        found = _read_sessions_file(candidate)
+        if len(found) > len(best_sessions):
+            best_path, best_sessions = candidate, found
+    if best_sessions:
+        with open(current_path, "w", encoding="utf-8") as f:
+            json.dump(best_sessions, f, ensure_ascii=False, indent=2)
 
 
 def load_sessions():
@@ -99,6 +220,7 @@ class FocusTimerApp:
         self.root.minsize(270, 400)
         self.root.resizable(True, True)  # drag any edge/corner to resize
 
+        migrate_legacy_data_if_needed()
         self.sessions = load_sessions()
         self.running = False
         self.start_time = None
@@ -122,6 +244,11 @@ class FocusTimerApp:
                             bg=BG, fg=FG_SECONDARY, cursor="hand2")
         cal_btn.place(relx=1.0, x=-16, y=16, anchor="ne")
         cal_btn.bind("<Button-1>", lambda e: self._open_calendar())
+
+        sync_btn = tk.Label(root, text="⚙", font=("Segoe UI", 14),
+                             bg=BG, fg=FG_SECONDARY, cursor="hand2")
+        sync_btn.place(relx=1.0, x=-46, y=15, anchor="ne")
+        sync_btn.bind("<Button-1>", lambda e: self._open_sync_settings())
 
         # Category switcher (segmented control)
         tab_frame = tk.Frame(root, bg=BG)
@@ -220,19 +347,22 @@ class FocusTimerApp:
         self._draw_button(CORAL, CORAL_HALO, "Stop")
         self._tick()
 
-    def _stop(self):
+    def _stop(self, end_time=None, auto_note=None):
         self.running = False
         if self._tick_job is not None:
             self.root.after_cancel(self._tick_job)
             self._tick_job = None
 
-        duration = time.time() - self.start_time
+        if end_time is None:
+            end_time = time.time()
+        duration = end_time - self.start_time
         if duration >= 5:  # ignore accidental very short taps
             self.sessions.append({
                 "category": self.current_category,
                 "start": datetime.fromtimestamp(self.start_time).isoformat(),
-                "end": datetime.now().isoformat(),
+                "end": datetime.fromtimestamp(end_time).isoformat(),
                 "duration_sec": round(duration),
+                "note": auto_note or "",
             })
             save_sessions(self.sessions)
 
@@ -243,7 +373,25 @@ class FocusTimerApp:
         self._refresh_history()
 
     def _tick(self):
-        elapsed = time.time() - self.start_time
+        now = time.time()
+        start_dt = datetime.fromtimestamp(self.start_time)
+        now_dt = datetime.fromtimestamp(now)
+
+        if now_dt.date() != start_dt.date():
+            # Crossed midnight: cut the session off at 00:00 and count it for the
+            # previous day. The new day always starts with a fresh manual tap.
+            midnight = datetime.combine(start_dt.date() + timedelta(days=1), datetime.min.time())
+            self._stop(end_time=midnight.timestamp(),
+                       auto_note="Stopped automatically at midnight (day changed)")
+            return
+
+        idle = get_idle_seconds()
+        if idle >= IDLE_LIMIT_SEC:
+            self._stop(end_time=now - idle,
+                       auto_note="Stopped automatically after 10 minutes of inactivity")
+            return
+
+        elapsed = now - self.start_time
         self.timer_label.config(text=fmt_hms(elapsed))
         self._tick_job = self.root.after(1000, self._tick)
 
@@ -393,6 +541,70 @@ class FocusTimerApp:
                   relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
                   activebackground=accent, command=close).pack(fill="x")
         self._place_dialog(win, 300, 210)
+
+    def _open_sync_settings(self):
+        win = self._dialog_shell("Sync Settings")
+        tk.Label(win, text="Sync Folder", font=FONT_STAT_LABEL, bg=BG, fg=FG_PRIMARY).pack(
+            padx=22, pady=(20, 6), anchor="w")
+
+        current = load_config().get("sync_base_folder")
+        status = f"Currently syncing to:\n{current}" if current else "Currently: saved on this computer only"
+        tk.Label(win, text=status, font=("Segoe UI", 9), bg=BG, fg=FG_SECONDARY,
+                 justify="left", wraplength=260).pack(padx=22, anchor="w")
+
+        tk.Label(win, text="Pick a folder that's synced by a cloud drive "
+                            "(Google Drive / OneDrive / Dropbox, etc.) -- this "
+                            "computer and any other one signed into the same "
+                            "account will then share this log automatically.",
+                 font=("Segoe UI", 9), bg=BG, fg=FG_SECONDARY, justify="left",
+                 wraplength=260).pack(padx=22, pady=(10, 0), anchor="w")
+
+        def choose():
+            folder = filedialog.askdirectory(parent=win, title="Choose sync folder")
+            if not folder:
+                return
+            old_path = data_file_path()
+            cfg = load_config()
+            cfg["sync_base_folder"] = folder
+            save_config(cfg)
+            new_path = data_file_path()
+            if os.path.exists(old_path) and not os.path.exists(new_path):
+                shutil.copy(old_path, new_path)
+            self.sessions = load_sessions()
+            self._refresh_history()
+            win.destroy()
+            self._info_dialog("Sync Settings", f"Now syncing to:\n{new_path}")
+
+        def reset():
+            cfg = load_config()
+            cfg.pop("sync_base_folder", None)
+            save_config(cfg)
+            self.sessions = load_sessions()
+            self._refresh_history()
+            win.destroy()
+            self._info_dialog("Sync Settings", "Back to saving on this computer only.")
+
+        def close():
+            win.destroy()
+
+        accent = self._category(self.current_category)["accent"]
+        tk.Button(win, text="Choose folder...", font=FONT_ROW, bg=accent, fg="white",
+                  relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
+                  activebackground=accent, command=choose).pack(fill="x", padx=22,
+                                                                 pady=(16, 8))
+
+        row2 = tk.Frame(win, bg=BG)
+        row2.pack(fill="x", padx=22, pady=(0, 20))
+        tk.Button(row2, text="Reset", font=FONT_ROW, bg=DIVIDER, fg=FG_PRIMARY,
+                  relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
+                  activebackground=DIVIDER, command=reset).pack(side="left", expand=True,
+                                                                 fill="x", padx=(0, 6))
+        tk.Button(row2, text="Close", font=FONT_ROW, bg=DIVIDER, fg=FG_PRIMARY,
+                  relief="flat", bd=0, padx=12, pady=7, cursor="hand2",
+                  activebackground=DIVIDER, command=close).pack(side="right", expand=True,
+                                                                 fill="x", padx=(6, 0))
+
+        self._place_dialog(win, 320, 350)
 
     # ------------------------------------------------------------ Calendar / day review
     # An overlay frame (calendar month grid, or a single day's timeline)
