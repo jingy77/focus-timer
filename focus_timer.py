@@ -341,9 +341,9 @@ class FocusTimerApp:
         else:
             self._start()
 
-    def _start(self):
+    def _start(self, start_time=None):
         self.running = True
-        self.start_time = time.time()
+        self.start_time = start_time if start_time is not None else time.time()
         self._draw_button(CORAL, CORAL_HALO, "Stop")
         self._tick()
 
@@ -378,11 +378,16 @@ class FocusTimerApp:
         now_dt = datetime.fromtimestamp(now)
 
         if now_dt.date() != start_dt.date():
-            # Crossed midnight: cut the session off at 00:00 and count it for the
-            # previous day. The new day always starts with a fresh manual tap.
+            # Crossed midnight: cut the session off at 00:00 and save it as its
+            # own record for the previous day, then automatically start a new,
+            # separate record at 00:00 and keep timing -- so if you're still
+            # working past midnight, the time from 00:00 onward still gets
+            # recorded instead of being silently lost. The two records are
+            # independent: deleting one never affects the other.
             midnight = datetime.combine(start_dt.date() + timedelta(days=1), datetime.min.time())
             self._stop(end_time=midnight.timestamp(),
                        auto_note="Stopped automatically at midnight (day changed)")
+            self._start(start_time=midnight.timestamp())
             return
 
         idle = get_idle_seconds()
@@ -690,6 +695,139 @@ class FocusTimerApp:
         return (text.replace("\\", "\\\\").replace(";", "\\;")
                     .replace(",", "\\,").replace("\n", "\\n"))
 
+    # ------------------------------------------------------- Export for AI
+    AI_PROMPT_HEADER = (
+        "You are a time-management / personal-productivity analyst. Below is my "
+        "raw time-tracking data for this period. Each entry has a start/end time, "
+        "a category (Focus / AI Chat / Reading / Work), and a short note I wrote "
+        "myself. Please:\n"
+        "1. Analyze my daily time-use patterns -- what I typically do at what times, "
+        "and whether there are consistent high-focus or low-focus periods;\n"
+        "2. Point out the ratio and interplay between focused time and easily-"
+        "distracted time (e.g. AI Chat);\n"
+        "3. Assess whether work and non-work time are balanced, and flag any "
+        "overload or notable gaps;\n"
+        "4. Using my notes for context, give concrete, actionable suggestions "
+        "rather than generic advice.\n\n"
+        "Data below (grouped by day; each line is one entry formatted as: "
+        "start-end (duration) category -- note):"
+    )
+
+    def _export_ai_data(self):
+        if not self.sessions:
+            self._info_dialog("Export for AI Analysis", "No sessions to export yet.")
+            return
+
+        win = self._dialog_shell("Export for AI Analysis")
+        tk.Label(win, text="Export for AI Analysis", font=FONT_STAT_LABEL, bg=BG,
+                 fg=FG_PRIMARY).pack(padx=22, pady=(20, 10), anchor="w")
+
+        accent = self._category(self.current_category)["accent"]
+
+        def run(range_key):
+            win.destroy()
+            self._do_export_ai(range_key)
+
+        for key, label in (("week", "This Week"), ("month", "This Month"),
+                            ("all", "All Records")):
+            tk.Button(win, text=label, font=FONT_ROW, bg=DIVIDER, fg=FG_PRIMARY,
+                      relief="flat", bd=0, padx=12, pady=9, cursor="hand2",
+                      activebackground=accent,
+                      command=lambda k=key: run(k)).pack(fill="x", padx=22, pady=(0, 8))
+
+        cancel_lbl = tk.Label(win, text="Cancel", font=FONT_ROW, bg=BG,
+                               fg=FG_SECONDARY, cursor="hand2")
+        cancel_lbl.pack(pady=(2, 16))
+        cancel_lbl.bind("<Button-1>", lambda e: win.destroy())
+
+        self._place_dialog(win, 300, 270)
+
+    def _do_export_ai(self, range_key):
+        today = date.today()
+        all_dates = [datetime.fromisoformat(s["start"]).date() for s in self.sessions]
+
+        if range_key == "week":
+            start_d = today - timedelta(days=today.weekday())
+            end_d = today
+            range_label = f"This week ({start_d.isoformat()} - {end_d.isoformat()})"
+        elif range_key == "month":
+            start_d = today.replace(day=1)
+            end_d = today
+            range_label = f"{calendar.month_name[today.month]} {today.year}"
+        else:
+            start_d = min(all_dates)
+            end_d = max(all_dates)
+            range_label = f"All records ({start_d.isoformat()} - {end_d.isoformat()})"
+
+        picked = [s for s in self.sessions
+                  if start_d <= datetime.fromisoformat(s["start"]).date() <= end_d]
+        if not picked:
+            self._info_dialog("Export for AI Analysis",
+                               "No sessions in that range -- try a different one.")
+            return
+
+        content = self._build_ai_export_text(picked, range_label)
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update()
+
+        folder = os.path.dirname(data_file_path())
+        safe_name = f"ai_export_{range_key}_{today.strftime('%Y%m%d')}.md"
+        path = os.path.join(folder, safe_name)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except OSError:
+            path = "Export for AI Analysis"
+
+        self._info_dialog(
+            "Export for AI Analysis",
+            "Copied to your clipboard -- paste it straight into your AI assistant "
+            f"(ChatGPT, Claude, etc.).\n\nAlso saved a copy to:\n{path}",
+        )
+
+    def _build_ai_export_text(self, sessions, range_label):
+        lines = [self.AI_PROMPT_HEADER, ""]
+        lines.append(f"Range: {range_label}")
+
+        total_sec = sum(s["duration_sec"] for s in sessions)
+        lines.append(f"Total time: {fmt_duration(total_sec)}")
+
+        per_cat_sec = {}
+        for s in sessions:
+            key = s.get("category", "focus")
+            per_cat_sec[key] = per_cat_sec.get(key, 0) + s["duration_sec"]
+        cat_parts = [f"{cat['label']} {fmt_duration(per_cat_sec[cat['key']])}"
+                     for cat in CATEGORIES if per_cat_sec.get(cat["key"], 0) > 0]
+        lines.append(f"By category: {', '.join(cat_parts)}")
+        lines.append("")
+        lines.append("## Day-by-day detail")
+        lines.append("")
+
+        by_date = {}
+        for s in sessions:
+            d = datetime.fromisoformat(s["start"]).date()
+            by_date.setdefault(d, []).append(s)
+
+        for d in sorted(by_date):
+            day_sessions = sorted(by_date[d], key=lambda s: s["start"])
+            lines.append(f"### {d.strftime('%a, %b %d')}")
+            for s in day_sessions:
+                start = datetime.fromisoformat(s["start"])
+                end = datetime.fromisoformat(s["end"])
+                cat = self._category(s.get("category", "focus"))
+                note = s.get("note", "").strip()
+                note_part = f" -- {note}" if note else ""
+                lines.append(f"- {start:%H:%M}-{end:%H:%M} "
+                             f"({fmt_duration(s['duration_sec'])}) "
+                             f"{cat['label']}{note_part}")
+            day_total = sum(s["duration_sec"] for s in day_sessions)
+            lines.append(f"  Day total: {fmt_duration(day_total)}")
+            lines.append("")
+
+        return "\n".join(lines)
+
     def _build_calendar(self, root, year, month):
         top = tk.Frame(root, bg=BG)
         top.pack(fill="x", padx=22, pady=(18, 0))
@@ -701,6 +839,13 @@ class FocusTimerApp:
                                fg=FG_SECONDARY, cursor="hand2")
         export_lbl.pack(side="right")
         export_lbl.bind("<Button-1>", lambda e: self._export_ics())
+
+        ai_row = tk.Frame(root, bg=BG)
+        ai_row.pack(fill="x", padx=22, pady=(4, 0))
+        ai_export_lbl = tk.Label(ai_row, text="Export for AI Analysis", font=FONT_ROW, bg=BG,
+                                  fg=FG_SECONDARY, cursor="hand2")
+        ai_export_lbl.pack(side="right")
+        ai_export_lbl.bind("<Button-1>", lambda e: self._export_ai_data())
 
         header = tk.Frame(root, bg=BG)
         header.pack(fill="x", padx=22, pady=(10, 4))
@@ -803,16 +948,25 @@ class FocusTimerApp:
         legend = tk.Frame(body, bg=BG)
         legend.pack(side="left", padx=(18, 0), fill="y")
 
+        # Tk's create_arc draws nothing when extent is exactly +-360 degrees
+        # (i.e. a single category made up 100% of the day), so handle that
+        # case by drawing a solid filled circle instead.
+        nonzero_cats = [c for c in CATEGORIES if per_cat_sec[c["key"]] > 0]
+        if len(nonzero_cats) == 1:
+            pie_cv.create_oval(2, 2, pie_size - 2, pie_size - 2,
+                                fill=nonzero_cats[0]["accent"], outline=BG, width=2)
+
         angle = 90.0
         for cat in CATEGORIES:
             sec = per_cat_sec[cat["key"]]
             if sec <= 0:
                 continue
             fraction = sec / day_total
-            extent = -fraction * 360
-            pie_cv.create_arc(2, 2, pie_size - 2, pie_size - 2, start=angle, extent=extent,
-                               fill=cat["accent"], outline=BG, width=2)
-            angle += extent
+            if len(nonzero_cats) > 1:
+                extent = -fraction * 360
+                pie_cv.create_arc(2, 2, pie_size - 2, pie_size - 2, start=angle, extent=extent,
+                                   fill=cat["accent"], outline=BG, width=2)
+                angle += extent
 
             row = tk.Frame(legend, bg=BG)
             row.pack(anchor="w", pady=2)
