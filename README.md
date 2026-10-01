@@ -1,6 +1,6 @@
 # Time Tracker
 
-A minimal, Apple-inspired time tracking tool for Windows. **Not a countdown timer** — tap the green button to start, tap the red button when you're done, and the session is saved automatically.
+A minimal, time tracking tool for Windows. Tap the green button to start, tap the red button when you're done, and the session is saved automatically.
 
 ## Features
 
