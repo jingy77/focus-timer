@@ -30,6 +30,19 @@ from tkinter import filedialog
 
 IDLE_LIMIT_SEC = 600  # auto-stop after 10 minutes with no mouse/keyboard activity
 
+# ---- Auto-start (skip having to manually tap "Start" every time) ----
+# Modeled on how established tools like ActivityWatch / RescueTime do this:
+# sustained activity for long enough counts as "focused." Either mouse OR
+# keyboard activity counts (not both at once -- you may type for minutes
+# without touching the mouse, or scroll/read with only the mouse; both are
+# perfectly normal focused states).
+AUTO_START_SUSTAINED_SEC = 180   # 3 minutes of sustained activity to auto-start
+                                  # (ActivityWatch's own AFK default is also 3 minutes)
+AUTO_START_GAP_TOLERANCE_SEC = 30  # longest single pause allowed within that
+                                    # "sustained activity" window -- a short pause
+                                    # (thinking, reading) doesn't reset the count,
+                                    # only a real break longer than this does
+
 # ---------------------------------------------------------------- Colors / fonts
 # Warm, soft, low-saturation palette for a calm, unhurried feel
 BG = "#FAF6F1"           # warm off-white background
@@ -225,6 +238,7 @@ class FocusTimerApp:
         self.running = False
         self.start_time = None
         self._tick_job = None
+        self._active_streak_start = None  # auto-start: when the current "sustained activity" streak began
         self.current_category = CATEGORIES[0]["key"]
         self._overlay = None  # calendar / day-view frame, when one is open
 
@@ -232,6 +246,11 @@ class FocusTimerApp:
         self._build_main(self.main_frame)
         self.main_frame.pack(fill="both", expand=True)
         self._select_category(self.current_category)
+
+        # Keep a single 1-second loop running at all times, whether or not a
+        # session is active: while running it watches for midnight/idle, and
+        # while idle it watches for sustained activity to auto-start.
+        self._tick()
 
     # ------------------------------------------------------------ Build UI
     def _build_main(self, root):
@@ -344,14 +363,11 @@ class FocusTimerApp:
     def _start(self, start_time=None):
         self.running = True
         self.start_time = start_time if start_time is not None else time.time()
+        self._active_streak_start = None  # started a session -- reset the auto-start streak
         self._draw_button(CORAL, CORAL_HALO, "Stop")
-        self._tick()
 
     def _stop(self, end_time=None, auto_note=None):
         self.running = False
-        if self._tick_job is not None:
-            self.root.after_cancel(self._tick_job)
-            self._tick_job = None
 
         if end_time is None:
             end_time = time.time()
@@ -367,37 +383,110 @@ class FocusTimerApp:
             save_sessions(self.sessions)
 
         self.start_time = None
+        self._active_streak_start = None  # start counting fresh for the next possible auto-start
         self.timer_label.config(text="00:00:00")
         cat = self._category(self.current_category)
         self._draw_button(cat["accent"], cat["halo"], "Start")
         self._refresh_history()
 
+    def _cancel_auto_start(self):
+        """Discard the session that was just auto-started -- never saved to disk."""
+        if not self.running:
+            return
+        self.running = False
+        self.start_time = None
+        self._active_streak_start = None
+        self.timer_label.config(text="00:00:00")
+        cat = self._category(self.current_category)
+        self._draw_button(cat["accent"], cat["halo"], "Start")
+        self._refresh_history()
+
+    def _auto_start_from_activity(self):
+        cat = self._category(self.current_category)
+        self._start()
+        self._show_auto_start_toast(cat)
+
+    def _show_auto_start_toast(self, cat):
+        """Non-blocking notice shown when a session auto-starts -- disappears
+        on its own after a few seconds, or can be undone right away (e.g. if
+        the guessed category is wrong)."""
+        toast = tk.Toplevel(self.root, bg=BG)
+        toast.overrideredirect(True)
+        try:
+            toast.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        toast.configure(highlightbackground=cat["accent"], highlightcolor=cat["accent"],
+                         highlightthickness=2)
+
+        tk.Label(toast, text=f"Noticed you're focused on {cat['label']} -- "
+                              f"started recording automatically",
+                 font=FONT_ROW, bg=BG, fg=FG_PRIMARY, wraplength=220,
+                 justify="left").pack(padx=14, pady=(12, 4), anchor="w")
+        undo = tk.Label(toast, text="Undo this one", font=("Segoe UI", 9),
+                         bg=BG, fg=cat["accent"], cursor="hand2")
+        undo.pack(padx=14, pady=(0, 12), anchor="e")
+
+        def dismiss():
+            if toast.winfo_exists():
+                toast.destroy()
+
+        def undo_click(event=None):
+            dismiss()
+            self._cancel_auto_start()
+
+        undo.bind("<Button-1>", undo_click)
+
+        self.root.update_idletasks()
+        w, h = 240, 88
+        x = self.root.winfo_rootx() + max(self.root.winfo_width() - w - 16, 16)
+        y = self.root.winfo_rooty() + 16
+        toast.geometry(f"{w}x{h}+{x}+{y}")
+        self.root.after(8000, dismiss)
+
+    def _watch_for_auto_start(self, now, idle):
+        """While not timing, watch for "sustained activity": either mouse or
+        keyboard input counts, short pauses (thinking, reading) are tolerated,
+        but a longer gap resets the streak. Once it reaches
+        AUTO_START_SUSTAINED_SEC, auto-start the currently selected category."""
+        if idle > AUTO_START_GAP_TOLERANCE_SEC:
+            self._active_streak_start = None  # too long a pause -- start over
+            return
+        if self._active_streak_start is None:
+            self._active_streak_start = now - idle  # streak began at the most recent input
+        elif now - self._active_streak_start >= AUTO_START_SUSTAINED_SEC:
+            self._active_streak_start = None
+            self._auto_start_from_activity()
+
     def _tick(self):
         now = time.time()
-        start_dt = datetime.fromtimestamp(self.start_time)
-        now_dt = datetime.fromtimestamp(now)
-
-        if now_dt.date() != start_dt.date():
-            # Crossed midnight: cut the session off at 00:00 and save it as its
-            # own record for the previous day, then automatically start a new,
-            # separate record at 00:00 and keep timing -- so if you're still
-            # working past midnight, the time from 00:00 onward still gets
-            # recorded instead of being silently lost. The two records are
-            # independent: deleting one never affects the other.
-            midnight = datetime.combine(start_dt.date() + timedelta(days=1), datetime.min.time())
-            self._stop(end_time=midnight.timestamp(),
-                       auto_note="Stopped automatically at midnight (day changed)")
-            self._start(start_time=midnight.timestamp())
-            return
-
         idle = get_idle_seconds()
-        if idle >= IDLE_LIMIT_SEC:
-            self._stop(end_time=now - idle,
-                       auto_note="Stopped automatically after 10 minutes of inactivity")
-            return
 
-        elapsed = now - self.start_time
-        self.timer_label.config(text=fmt_hms(elapsed))
+        if self.running:
+            start_dt = datetime.fromtimestamp(self.start_time)
+            now_dt = datetime.fromtimestamp(now)
+
+            if now_dt.date() != start_dt.date():
+                # Crossed midnight: cut the session off at 00:00 and save it as
+                # its own record for the previous day, then automatically start
+                # a new, separate record at 00:00 and keep timing -- so if
+                # you're still working past midnight, the time from 00:00
+                # onward still gets recorded instead of being silently lost.
+                # The two records are independent: deleting one never affects
+                # the other.
+                midnight = datetime.combine(start_dt.date() + timedelta(days=1), datetime.min.time())
+                self._stop(end_time=midnight.timestamp(),
+                           auto_note="Stopped automatically at midnight (day changed)")
+                self._start(start_time=midnight.timestamp())
+            elif idle >= IDLE_LIMIT_SEC:
+                self._stop(end_time=now - idle,
+                           auto_note="Stopped automatically after 10 minutes of inactivity")
+            else:
+                elapsed = now - self.start_time
+                self.timer_label.config(text=fmt_hms(elapsed))
+        else:
+            self._watch_for_auto_start(now, idle)
+
         self._tick_job = self.root.after(1000, self._tick)
 
     # ------------------------------------------------------------ History

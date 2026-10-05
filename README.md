@@ -1,6 +1,6 @@
 # Time Tracker
 
-A minimal, time tracking tool for Windows. Tap the green button to start, tap the red button when you're done, and the session is saved automatically.
+A minimal, Apple-inspired time tracking tool for Windows. **Not a countdown timer** — tap the green button to start, tap the red button when you're done, and the session is saved automatically.
 
 ## Features
 
@@ -10,6 +10,7 @@ A minimal, time tracking tool for Windows. Tap the green button to start, tap th
 - Each category shows its own "Today's total" and today's session log
 - The category switcher locks while a session is running, so you can't accidentally log time to the wrong category; sessions save automatically and persist locally
 - If there's no mouse or keyboard activity anywhere on the system for 10 minutes, the session stops itself and is saved up to the moment you actually went idle (not padded with the idle time); its note is tagged "stopped automatically". This check only works on Windows
+- No need to tap Start every time: while nothing is being timed, if either the mouse or keyboard stays active for a sustained 3 minutes (short pauses -- thinking, reading -- are tolerated, but a gap longer than 30 seconds resets the count), a session for the currently selected category starts automatically. A small notice appears in the corner and fades out on its own after a few seconds, or you can tap "Undo this one" right away if it guessed the wrong category
 - If a session runs past midnight, it's automatically cut off and saved as the previous day's session at 00:00, and a new, separate session automatically starts right at 00:00 and keeps timing — so if you're still working past midnight, that time still gets recorded instead of silently going untracked. The two sessions are saved independently; deleting one never affects the other
 - Click any row in "Today's Log" to attach a short note (what you read, who you chatted with, etc.); right-click a row to delete it (with a confirmation step)
 - Dialogs are styled to match the app itself (warm background, soft-colored buttons) instead of the system's default message boxes
